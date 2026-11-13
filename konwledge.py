@@ -1,4 +1,9 @@
+'''
+知识库入库。
+把文本切成片段并向量化后写入 Chroma，同时用 SQLite 记录文件指纹；索引配置变化时会清空旧向量再重新入库。
+'''
 import hashlib
+import json
 import os
 import sqlite3
 from datetime import datetime
@@ -25,6 +30,14 @@ def connect_db():           #连接数据库
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS index_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()       #提交事务
     return conn
 
@@ -33,8 +46,53 @@ def get_collection():
     client = chromadb.PersistentClient(path=config.chroma_path)
     return client.get_or_create_collection(
         name=config.chroma_collection,
-        metadata={"hnsw:space": "l2"},
+        metadata={"hnsw:space": config.chroma_space},
     )
+
+
+def current_index_settings():
+    return {
+        "chunk_size": str(config.chunk_size),
+        "chunk_overlap": str(config.chunk_overlap),
+        "separators": json.dumps(config.separators, ensure_ascii=False),
+        "embedding_model": config.embedding_model_name,
+        "hnsw_space": config.chroma_space,
+    }
+
+
+def sync_index():
+    """切块、重叠、分隔符、嵌入模型或距离变了，就清掉旧向量再入库。"""
+    conn = connect_db()
+    try:
+        stored = {
+            row["key"]: row["value"]
+            for row in conn.execute("SELECT key, value FROM index_meta")
+        }
+        current = current_index_settings()
+        client = chromadb.PersistentClient(path=config.chroma_path)
+        names = []
+        for item in client.list_collections():
+            names.append(item if isinstance(item, str) else item.name)
+        collection_missing = config.chroma_collection not in names
+        settings_changed = stored != current
+        if not settings_changed and not collection_missing:
+            return
+
+        if not collection_missing:
+            client.delete_collection(config.chroma_collection)
+        conn.execute("DELETE FROM documents")
+        conn.execute("DELETE FROM index_meta")
+        conn.executemany(
+            "INSERT INTO index_meta (key, value) VALUES (?, ?)",
+            list(current.items()),
+        )
+        conn.commit()
+        if settings_changed:
+            print("索引配置已变化，已清空旧向量，开始重新入库")
+        else:
+            print("向量库不存在，开始重新入库")
+    finally:
+        conn.close()
 
 
 def get_string_md5(input_str: str, encoding="utf-8") -> str:
@@ -128,6 +186,7 @@ def _spin(stop_event, label):   #定义一个旋转动画函数，label是前面
 
 
 if __name__ == "__main__":
+    sync_index()
     knowledge_base_service = KnowledgeBaseService()
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     names = [
@@ -147,3 +206,4 @@ if __name__ == "__main__":
             stop_event.set()
             worker.join()
         print(f"[{index}/{total}] {file_path} {result}")
+
