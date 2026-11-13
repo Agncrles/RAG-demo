@@ -1,9 +1,9 @@
 import hashlib
-import json
 import os
 import sqlite3
 from datetime import datetime
 
+import chromadb
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 import config_data as config
@@ -25,23 +25,16 @@ def connect_db():           #连接数据库
         )
         """
     )
-    conn.execute(       #执行sql语句，创建chunks表，如果表不存在则创建，表结构如下：
-        """
-        CREATE TABLE IF NOT EXISTS chunks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source TEXT NOT NULL,
-            content TEXT NOT NULL,
-            embedding TEXT NOT NULL,
-            create_time TEXT NOT NULL,
-            operator TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(       #执行sql语句，为chunks表创建索引，如果索引不存在则创建
-        "CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source)"
-    )   #    
     conn.commit()       #提交事务
     return conn
+
+
+def get_collection():
+    client = chromadb.PersistentClient(path=config.chroma_path)
+    return client.get_or_create_collection(
+        name=config.chroma_collection,
+        metadata={"hnsw:space": "l2"},
+    )
 
 
 def get_string_md5(input_str: str, encoding="utf-8") -> str:
@@ -81,12 +74,26 @@ class KnowledgeBaseService(object):
             if not knowledge_chunks:
                 return "[成功] 0段"   #如果文本为空，则返回成功，0段
 
-            vectors = config.embedding_function.embed_documents(knowledge_chunks)   #把分割好的chunk进行向量化存入数据库
+            vectors = config.embedding_function.embed_documents(knowledge_chunks)   #把分割好的chunk进行向量化
             create_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")   #获取当前时间，会一并写入数据库
             operator = "admin"   #操作人，写入数据库
+            collection = get_collection()
+            collection.delete(where={"source": filename})   #删掉这个文件在索引里的旧片段
+            collection.add(
+                ids=[f"{filename}-{i}" for i in range(len(knowledge_chunks))],
+                documents=knowledge_chunks,
+                embeddings=vectors,
+                metadatas=[
+                    {
+                        "source": filename,
+                        "create_time": create_time,
+                        "operator": operator,
+                    }
+                    for _ in knowledge_chunks
+                ],
+            )
             with conn:
-                conn.execute("DELETE FROM chunks WHERE source = ?", (filename,))   #删除数据库中该文件的chunk
-                conn.execute(    #执行sql语句，插入数据到chunks表
+                conn.execute(    #执行sql语句，插入数据到documents表
                     """
                     INSERT INTO documents (
                         source, content_md5, chunk_count, create_time, operator
@@ -99,24 +106,6 @@ class KnowledgeBaseService(object):
                         operator = excluded.operator
                     """,
                     (filename, md5_hex, len(knowledge_chunks), create_time, operator),
-                )
-                conn.executemany(
-                    """
-                    INSERT INTO chunks (
-                        source, content, embedding, create_time, operator
-                    )
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    [
-                        (
-                            filename,
-                            chunk,
-                            json.dumps(vector),
-                            create_time,
-                            operator,
-                        )
-                        for chunk, vector in zip(knowledge_chunks, vectors)
-                    ],
                 )
             return f"[成功] {len(knowledge_chunks)}段"
         finally:

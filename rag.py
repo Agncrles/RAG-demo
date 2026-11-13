@@ -38,4 +38,4 @@ class RagService(object):           # 定义RAG服务
 
 if __name__ == "__main__":
     service = RagService()
-    print(service.ask("我的体重180斤，尺码推荐什么？选哪些面料合适"))
+    print(service.ask("成年人睡眠时长多少比较合适？"))

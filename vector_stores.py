@@ -1,11 +1,9 @@
-import json
-
 from langchain_core.documents import Document
 from langchain_core.runnables import RunnableLambda
 from langchain_ollama import OllamaEmbeddings
 
 import config_data as config
-from konwledge import connect_db
+from konwledge import connect_db, get_collection
 
 
 class VectorStores(object):
@@ -13,34 +11,24 @@ class VectorStores(object):
         self.embedding = embedding
         conn = connect_db()
         conn.close()
+        get_collection()
 
     def similarity_search(self, query, k):
         query_vector = self.embedding.embed_query(query)
-        conn = connect_db()
-        try:
-            rows = conn.execute(
-                "SELECT source, content, embedding, create_time, operator FROM chunks"
-            ).fetchall()
-        finally:
-            conn.close() 
+        collection = get_collection()
+        count = collection.count()
+        if count == 0:
+            return []
 
-        ranked = []
-        for row in rows:
-            vector = json.loads(row["embedding"])
-            distance = sum((a - b) ** 2 for a, b in zip(query_vector, vector))
-            ranked.append((distance, row))
-        ranked.sort(key=lambda item: item[0])
-
+        result = collection.query(
+            query_embeddings=[query_vector],
+            n_results=min(k, count),
+        )
+        documents = result["documents"][0] or []
+        metadatas = result["metadatas"][0] or []
         return [
-            Document(
-                page_content=row["content"],
-                metadata={
-                    "source": row["source"],
-                    "create_time": row["create_time"],
-                    "operator": row["operator"],
-                },
-            )
-            for _, row in ranked[:k]
+            Document(page_content=content, metadata=meta or {})
+            for content, meta in zip(documents, metadatas)
         ]
 
     def get_retriever(self):
